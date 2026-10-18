@@ -135,6 +135,51 @@ fn test_unauthorized_caller_rejected() {
 }
 
 // ---------------------------------------------------------------------------
+// #83 — Multi-instance split contract registry tests
+// ---------------------------------------------------------------------------
+
+/// A second split contract registered by the admin can report metrics (#83).
+#[test]
+fn test_multiple_split_contracts_can_report() {
+    let (env, split_a, dashboard_id) = setup();
+    let client = DashboardContractClient::new(&env, &dashboard_id);
+
+    let split_b = Address::generate(&env);
+    client.register_split_contract(&split_b);
+
+    assert!(client.is_authorized_split_contract(&split_a));
+    assert!(client.is_authorized_split_contract(&split_b));
+
+    let creator = Address::generate(&env);
+    client.record_created(&creator, &1000_i128);
+    client.record_created(&creator, &2000_i128);
+
+    let dash = client.get_creator_dashboard(&creator);
+    assert_eq!(dash.invoice_count, 2);
+    assert_eq!(dash.total_volume, 3000);
+}
+
+/// Registering the same split contract twice is idempotent (#83).
+#[test]
+fn test_register_split_contract_idempotent() {
+    let (env, split_a, dashboard_id) = setup();
+    let client = DashboardContractClient::new(&env, &dashboard_id);
+
+    client.register_split_contract(&split_a);
+    assert!(client.is_authorized_split_contract(&split_a));
+}
+
+/// An unregistered split contract is not authorized (#83).
+#[test]
+fn test_unregistered_split_contract_not_authorized() {
+    let (env, _split_a, dashboard_id) = setup();
+    let client = DashboardContractClient::new(&env, &dashboard_id);
+
+    let stranger = Address::generate(&env);
+    assert!(!client.is_authorized_split_contract(&stranger));
+}
+
+// ---------------------------------------------------------------------------
 // #50 — Dashboard event emission tests
 // ---------------------------------------------------------------------------
 
