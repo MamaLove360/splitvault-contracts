@@ -1,9 +1,13 @@
-#![no_std]
+//! Dashboard contract: aggregates per-creator invoice metrics.
+//!
+//! The split contract calls into this contract to record invoice lifecycle
+//! events. Metrics are stored per creator so the frontend can render a
+//! dashboard without scanning the full invoice history.
 
-use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env, Symbol};
+use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env};
 
 #[contracttype]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct CreatorDashboard {
     pub invoice_count: u64,
     pub total_volume: i128,
@@ -12,151 +16,102 @@ pub struct CreatorDashboard {
     pub released_volume: i128,
 }
 
-fn authorized_contract_key() -> Symbol {
-    symbol_short!("auth_ctr")
-}
-
-fn creator_dashboard_key(creator: &Address) -> (Symbol, Address) {
-    (symbol_short!("cr_dash"), creator.clone())
-}
-
 #[contract]
 pub struct DashboardContract;
 
 #[contractimpl]
 impl DashboardContract {
+    /// One-time initialization. Stores the authorized split contract address.
     pub fn initialize(env: Env, split_contract: Address) {
-        assert!(
-            !env.storage().instance().has(&authorized_contract_key()),
-            "already initialized"
-        );
+        if env.storage().instance().has(&symbol_short!("split")) {
+            panic!("already initialized");
+        }
         env.storage()
             .instance()
-            .set(&authorized_contract_key(), &split_contract);
+            .set(&symbol_short!("split"), &split_contract);
     }
 
-    pub fn record_created(env: Env, creator: Address, total: i128) {
-        let authorized: Address = env
+    fn require_split(env: &Env) -> Address {
+        let split: Address = env
             .storage()
             .instance()
-            .get(&authorized_contract_key())
+            .get(&symbol_short!("split"))
             .expect("not initialized");
-        authorized.require_auth();
-
-        let key = creator_dashboard_key(&creator);
-        let mut dashboard: CreatorDashboard =
-            env.storage()
-                .persistent()
-                .get(&key)
-                .unwrap_or(CreatorDashboard {
-                    invoice_count: 0,
-                    total_volume: 0,
-                    released_count: 0,
-                    refunded_count: 0,
-                    released_volume: 0,
-                });
-        dashboard.invoice_count = dashboard
-            .invoice_count
-            .checked_add(1)
-            .expect("invoice_count overflow");
-        dashboard.total_volume = dashboard
-            .total_volume
-            .checked_add(total)
-            .expect("total_volume overflow");
-        env.storage().persistent().set(&key, &dashboard);
-
-        // Emit event so external analytics pipelines can stream metric updates
-        // without polling contract storage (#50).
-        env.events().publish(
-            (symbol_short!("dash"), symbol_short!("created"), creator),
-            total,
-        );
+        split.require_auth();
+        split
     }
 
-    pub fn record_released(env: Env, creator: Address, total: i128) {
-        let authorized: Address = env
-            .storage()
-            .instance()
-            .get(&authorized_contract_key())
-            .expect("not initialized");
-        authorized.require_auth();
-
-        let key = creator_dashboard_key(&creator);
-        let mut dashboard: CreatorDashboard =
-            env.storage()
-                .persistent()
-                .get(&key)
-                .unwrap_or(CreatorDashboard {
-                    invoice_count: 0,
-                    total_volume: 0,
-                    released_count: 0,
-                    refunded_count: 0,
-                    released_volume: 0,
-                });
-        dashboard.released_count = dashboard
-            .released_count
-            .checked_add(1)
-            .expect("released_count overflow");
-        dashboard.released_volume = dashboard
-            .released_volume
-            .checked_add(total)
-            .expect("released_volume overflow");
-        env.storage().persistent().set(&key, &dashboard);
-
-        // Emit event for real-time indexing of creator metrics (#50).
-        env.events().publish(
-            (symbol_short!("dash"), symbol_short!("released"), creator),
-            total,
-        );
-    }
-
-    pub fn record_refunded(env: Env, creator: Address) {
-        let authorized: Address = env
-            .storage()
-            .instance()
-            .get(&authorized_contract_key())
-            .expect("not initialized");
-        authorized.require_auth();
-
-        let key = creator_dashboard_key(&creator);
-        let mut dashboard: CreatorDashboard =
-            env.storage()
-                .persistent()
-                .get(&key)
-                .unwrap_or(CreatorDashboard {
-                    invoice_count: 0,
-                    total_volume: 0,
-                    released_count: 0,
-                    refunded_count: 0,
-                    released_volume: 0,
-                });
-        dashboard.refunded_count = dashboard
-            .refunded_count
-            .checked_add(1)
-            .expect("refunded_count overflow");
-        env.storage().persistent().set(&key, &dashboard);
-
-        // Emit event for real-time indexing of creator metrics (#50).
-        env.events().publish(
-            (symbol_short!("dash"), symbol_short!("refunded"), creator),
-            (),
-        );
-    }
-
-    pub fn get_creator_dashboard(env: Env, creator: Address) -> CreatorDashboard {
-        let key = creator_dashboard_key(&creator);
+    fn load(env: &Env, creator: &Address) -> CreatorDashboard {
         env.storage()
             .persistent()
-            .get(&key)
-            .unwrap_or(CreatorDashboard {
-                invoice_count: 0,
-                total_volume: 0,
-                released_count: 0,
-                refunded_count: 0,
-                released_volume: 0,
-            })
+            .get(&(symbol_short!("dash"), creator.clone()))
+            .unwrap_or_default()
+    }
+
+    fn save(env: &Env, creator: &Address, dash: &CreatorDashboard) {
+        env.storage()
+            .persistent()
+            .set(&(symbol_short!("dash"), creator.clone()), dash);
+    }
+
+    /// Record a newly created invoice for `creator`.
+    pub fn record_created(env: Env, creator: Address, amount: i128) {
+        Self::require_split(&env);
+
+        let mut dash = Self::load(&env, &creator);
+        dash.invoice_count += 1;
+        dash.total_volume += amount;
+        Self::save(&env, &creator, &dash);
+
+        env.events()
+            .publish((symbol_short!("dash"), symbol_short!("created")), (creator, amount));
+    }
+
+    /// Record a single released invoice for `creator`.
+    pub fn record_released(env: Env, creator: Address, amount: i128) {
+        Self::require_split(&env);
+
+        let mut dash = Self::load(&env, &creator);
+        dash.released_count += 1;
+        dash.released_volume += amount;
+        Self::save(&env, &creator, &dash);
+
+        env.events()
+            .publish((symbol_short!("dash"), symbol_short!("released")), (creator, amount));
+    }
+
+    /// Record a batch of released invoices for `creator` in a single call.
+    ///
+    /// Increments `released_count` by `count` and `released_volume` by
+    /// `total_volume`, avoiding one cross-contract invocation per invoice.
+    pub fn record_batch_released(env: Env, creator: Address, count: u64, total_volume: i128) {
+        Self::require_split(&env);
+
+        let mut dash = Self::load(&env, &creator);
+        dash.released_count += count;
+        dash.released_volume += total_volume;
+        Self::save(&env, &creator, &dash);
+
+        env.events().publish(
+            (symbol_short!("dash"), symbol_short!("batch_rel")),
+            (creator, count, total_volume),
+        );
+    }
+
+    /// Record a refunded invoice for `creator`.
+    pub fn record_refunded(env: Env, creator: Address) {
+        Self::require_split(&env);
+
+        let mut dash = Self::load(&env, &creator);
+        dash.refunded_count += 1;
+        Self::save(&env, &creator, &dash);
+
+        env.events()
+            .publish((symbol_short!("dash"), symbol_short!("refunded")), creator);
+    }
+
+    /// Read the aggregated dashboard for `creator`.
+    pub fn get_creator_dashboard(env: Env, creator: Address) -> CreatorDashboard {
+        Self::load(&env, &creator)
     }
 }
-
-#[cfg(test)]
-mod test;

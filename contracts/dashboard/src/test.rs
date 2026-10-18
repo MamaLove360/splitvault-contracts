@@ -135,6 +135,41 @@ fn test_unauthorized_caller_rejected() {
 }
 
 // ---------------------------------------------------------------------------
+// #85 — Batch ingestion tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_record_batch_released_updates_stats() {
+    let (env, _split_id, dashboard_id) = setup();
+    let client = DashboardContractClient::new(&env, &dashboard_id);
+
+    let creator = Address::generate(&env);
+
+    client.record_batch_released(&creator, &10_u64, &50_000_i128);
+
+    let dash = client.get_creator_dashboard(&creator);
+    assert_eq!(dash.released_count, 10);
+    assert_eq!(dash.released_volume, 50_000);
+    assert_eq!(dash.invoice_count, 0);
+    assert_eq!(dash.refunded_count, 0);
+}
+
+#[test]
+fn test_record_batch_released_accumulates() {
+    let (env, _split_id, dashboard_id) = setup();
+    let client = DashboardContractClient::new(&env, &dashboard_id);
+
+    let creator = Address::generate(&env);
+
+    client.record_released(&creator, &1_000_i128);
+    client.record_batch_released(&creator, &10_u64, &50_000_i128);
+
+    let dash = client.get_creator_dashboard(&creator);
+    assert_eq!(dash.released_count, 11);
+    assert_eq!(dash.released_volume, 51_000);
+}
+
+// ---------------------------------------------------------------------------
 // #50 — Dashboard event emission tests
 // ---------------------------------------------------------------------------
 
@@ -207,5 +242,20 @@ fn test_record_refunded_emits_event() {
     assert!(
         find_dash_event(&env, symbol_short!("refunded")),
         "record_refunded did not emit (dash, refunded) event",
+    );
+}
+
+/// `record_batch_released` must emit `(dash, batch_rel)` (#85).
+#[test]
+fn test_record_batch_released_emits_event() {
+    let (env, _split_id, dashboard_id) = setup();
+    let client = DashboardContractClient::new(&env, &dashboard_id);
+    let creator = Address::generate(&env);
+
+    client.record_batch_released(&creator, &10_u64, &50_000_i128);
+
+    assert!(
+        find_dash_event(&env, symbol_short!("batch_rel")),
+        "record_batch_released did not emit (dash, batch_rel) event",
     );
 }
