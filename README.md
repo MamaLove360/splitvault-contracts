@@ -140,3 +140,6 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) for the full contribution guide.
 
 <!-- handsoff-issue-73 -->
 - #73: Missing Transfer Failure Handling in Escrow Auto-Release Logic
+
+<!-- handsoff-issue-75 -->
+- #75: Persistent Storage Rent Depletion Risk on Inactive Escrow Entries
