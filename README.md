@@ -135,3 +135,8 @@ This project participates in the [Drips Wave Program](https://drips.network/wave
 See [CONTRIBUTING.md](./CONTRIBUTING.md) for the full contribution guide.
 
 **Do not start coding until assigned to an issue by a maintainer.**
+
+## Handsoff notes
+
+<!-- handsoff-issue-86 -->
+- #86: Out-of-Registry Storage Keys Bypassing Typed `StorageKey` Architecture
