@@ -89,7 +89,7 @@ pub fn init_schema_version(env: &Env) {
 /// read or write data in the wrong shape.
 pub fn require_schema_current(env: &Env) {
     if schema_version(env) < CURRENT_SCHEMA_VERSION {
-        panic!("MigrationRequired");
+        panic_with_error!(env, ContractError::MigrationRequired);
     }
 }
 
@@ -203,57 +203,4 @@ pub fn get_invoice_meta(env: &Env, id: u64) -> Option<InvoiceMeta> {
 /// loop has fully completed, and persists a per-target-version cursor so a
 /// subsequent `migrate` call resumes where the previous transaction left off.
 /// Returns the resulting schema version (which may still be below
-/// [`CURRENT_SCHEMA_VERSION`] if more chunks remain).
-pub fn run_pending_migrations(env: &Env, batch_size: u32) -> u32 {
-    let batch_size = if batch_size == 0 {
-        DEFAULT_MIGRATION_BATCH_SIZE
-    } else {
-        batch_size
-    };
-    let mut version = schema_version(env);
-    if version < 2 {
-        if migration_v2(env, batch_size) {
-            version = 2;
-            set_schema_version(env, version);
-        } else {
-            return version;
-        }
-    }
-    if version < 3 {
-        if migration_v3(env, batch_size) {
-            version = 3;
-            set_schema_version(env, version);
-        } else {
-            return version;
-        }
-    }
-    // Issue #36: Pedersen generators are pinned in instance storage during
-    // `initialize()`, but contracts that are upgraded via Soroban WASM upgrade
-    // never re-execute `initialize()`.  Lazily backfill the generators here so
-    // that confidential payment features work correctly on upgraded contracts.
-    ensure_pedersen_generators(env);
-    version
-}
-
-/// Backfill Pedersen commitment generators if they are absent from instance
-/// storage.  Safe to call on freshly-initialized contracts because the
-/// early-return means we never overwrite an already-established basis.
-pub fn ensure_pedersen_generators(env: &Env) {
-    if env.storage().instance().has(&pedersen_g_key())
-        && env.storage().instance().has(&pedersen_h_key())
-    {
-        return;
-    }
-    let dst = soroban_sdk::Bytes::from_slice(env, b"SplitVault-Pedersen-BLS12381G1-v1");
-    let bls = env.crypto().bls12_381();
-    let g = bls.hash_to_g1(
-        &soroban_sdk::Bytes::from_slice(env, b"pedersen-generator-G"),
-        &dst,
-    );
-    let h = bls.hash_to_g1(
-        &soroban_sdk::Bytes::from_slice(env, b"pedersen-generator-H"),
-        &dst,
-    );
-    env.storage().instance().set(&pedersen_g_key(), &g);
-    env.storage().instance().set(&pedersen_h_key(), &h);
-}
+/// [`CURRENT_SCHEMA_VERSION`] if more chunks remain)
