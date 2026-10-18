@@ -39,6 +39,16 @@ fn require_authorized_split_contract(env: &Env, caller: &Address) {
     caller.require_auth();
 }
 
+fn require_admin(env: &Env) -> Address {
+    let admin: Address = env
+        .storage()
+        .instance()
+        .get(&admin_key())
+        .expect("not initialized");
+    admin.require_auth();
+    admin
+}
+
 #[contract]
 pub struct DashboardContract;
 
@@ -58,12 +68,7 @@ impl DashboardContract {
     /// Register an additional split contract instance (e.g. factory-deployed).
     /// Only the dashboard admin may authorize new split contracts.
     pub fn register_split_contract(env: Env, split_contract: Address) {
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&admin_key())
-            .expect("not initialized");
-        admin.require_auth();
+        require_admin(&env);
 
         env.storage()
             .instance()
@@ -73,6 +78,40 @@ impl DashboardContract {
             (symbol_short!("dash"), symbol_short!("register")),
             split_contract,
         );
+    }
+
+    /// Update the authorized split contract address, e.g. after a protocol
+    /// upgrade replaces the split contract. Requires admin authorization.
+    pub fn set_authorized_contract(env: Env, split_contract: Address) {
+        require_admin(&env);
+
+        env.storage()
+            .instance()
+            .set(&authorized_contract_key(&split_contract), &true);
+
+        env.events().publish(
+            (symbol_short!("dash"), symbol_short!("set_auth")),
+            split_contract,
+        );
+    }
+
+    /// Rotate the dashboard admin. Requires the current admin's authorization.
+    pub fn set_admin(env: Env, new_admin: Address) {
+        require_admin(&env);
+
+        env.storage().instance().set(&admin_key(), &new_admin);
+
+        env.events().publish(
+            (symbol_short!("dash"), symbol_short!("set_admin")),
+            new_admin,
+        );
+    }
+
+    pub fn get_admin(env: Env) -> Address {
+        env.storage()
+            .instance()
+            .get(&admin_key())
+            .expect("not initialized")
     }
 
     pub fn is_authorized_split_contract(env: Env, caller: Address) -> bool {
