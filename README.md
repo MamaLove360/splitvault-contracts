@@ -143,3 +143,6 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) for the full contribution guide.
 
 <!-- handsoff-issue-70 -->
 - #70: Total Incompatibility Between `cancel_invoice` and `refund` Entry Points
+
+<!-- handsoff-issue-71 -->
+- #71: Unchecked Arbitrary `invoice_id` in Blacklist `submit_appeal`
