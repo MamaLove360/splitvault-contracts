@@ -140,3 +140,6 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) for the full contribution guide.
 
 <!-- handsoff-issue-69 -->
 - #69: Reentrancy Exposure in Direct Token Callback Integration
+
+<!-- handsoff-issue-70 -->
+- #70: Total Incompatibility Between `cancel_invoice` and `refund` Entry Points
