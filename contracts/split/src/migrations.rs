@@ -15,6 +15,13 @@
 //! is nothing to migrate for storage that never existed in an older shape.
 //! Only a contract whose Wasm was upgraded out from under existing data
 //! (leaving `schema_version` at a stale value) needs `migrate`.
+//!
+//! Migrations are chunked: each `migrate` call processes at most
+//! [`DEFAULT_MIGRATION_BATCH_SIZE`] invoice ids (or a caller-supplied
+//! `batch_size`) and persists a per-target-version cursor so consecutive
+//! transactions resume where the previous one left off. This keeps a single
+//! transaction within Soroban's instruction budget even for contracts with
+//! thousands of invoices.
 
 use super::*;
 use soroban_sdk::contracttype;
@@ -23,9 +30,37 @@ use soroban_sdk::contracttype;
 /// new `migration_vN` and wire it into [`run_pending_migrations`].
 pub const CURRENT_SCHEMA_VERSION: u32 = 3;
 
+/// Default number of invoice ids processed per `migrate` invocation when the
+/// caller does not supply an explicit `batch_size`.
+pub const DEFAULT_MIGRATION_BATCH_SIZE: u32 = 50;
+
 /// Instance storage: current on-chain schema version.
 pub(crate) fn schema_version_key() -> Symbol {
     symbol_short!("schm_ver")
+}
+
+/// Instance storage: per-target-version migration cursor (last processed id).
+pub(crate) fn migration_cursor_key(target_version: u32) -> (Symbol, u32) {
+    (symbol_short!("mig_cur"), target_version)
+}
+
+fn get_migration_cursor(env: &Env, target_version: u32) -> u64 {
+    env.storage()
+        .instance()
+        .get(&migration_cursor_key(target_version))
+        .unwrap_or(0)
+}
+
+fn set_migration_cursor(env: &Env, target_version: u32, cursor: u64) {
+    env.storage()
+        .instance()
+        .set(&migration_cursor_key(target_version), &cursor);
+}
+
+fn clear_migration_cursor(env: &Env, target_version: u32) {
+    env.storage()
+        .instance()
+        .remove(&migration_cursor_key(target_version));
 }
 
 /// Current schema version. Contracts deployed before this framework existed
@@ -78,15 +113,25 @@ pub(crate) fn invoice_meta_key_v2(id: u64) -> (Symbol, u64) {
     (symbol_short!("inv_meta"), id)
 }
 
-fn migration_v2(env: &Env) {
+/// Process a bounded chunk of the v1 -> v2 backfill. Returns `true` when the
+/// migration is complete (cursor reached `last_id`), `false` when more chunks
+/// remain.
+fn migration_v2(env: &Env, batch_size: u32) -> bool {
     // The invoice counter holds the highest assigned id (ids are 1-based),
     // not a next-id cursor — see `_create_invoice_inner`.
     let last_id: u64 = env.storage().persistent().get(&counter_key()).unwrap_or(0);
+    let mut cursor = get_migration_cursor(env, 2);
+    if cursor >= last_id {
+        clear_migration_cursor(env, 2);
+        return true;
+    }
     let default_meta = InvoiceMeta {
         note: String::from_str(env, ""),
         priority: 0,
     };
-    for id in 1..=last_id {
+    let end = cursor.saturating_add(batch_size as u64).min(last_id);
+    let mut id = cursor + 1;
+    while id <= end {
         if env.storage().persistent().has(&invoice_key(id))
             && !env.storage().persistent().has(&invoice_meta_key_v2(id))
         {
@@ -94,6 +139,15 @@ fn migration_v2(env: &Env) {
                 .persistent()
                 .set(&invoice_meta_key_v2(id), &default_meta);
         }
+        id += 1;
+    }
+    cursor = end;
+    if cursor >= last_id {
+        clear_migration_cursor(env, 2);
+        true
+    } else {
+        set_migration_cursor(env, 2, cursor);
+        false
     }
 }
 
@@ -108,9 +162,18 @@ pub(crate) fn invoice_meta_key_v3(id: u64) -> (Symbol, u64) {
     (symbol_short!("inv_note"), id)
 }
 
-fn migration_v3(env: &Env) {
+/// Process a bounded chunk of the v2 -> v3 key rename. Returns `true` when the
+/// migration is complete, `false` when more chunks remain.
+fn migration_v3(env: &Env, batch_size: u32) -> bool {
     let last_id: u64 = env.storage().persistent().get(&counter_key()).unwrap_or(0);
-    for id in 1..=last_id {
+    let mut cursor = get_migration_cursor(env, 3);
+    if cursor >= last_id {
+        clear_migration_cursor(env, 3);
+        return true;
+    }
+    let end = cursor.saturating_add(batch_size as u64).min(last_id);
+    let mut id = cursor + 1;
+    while id <= end {
         let old_key = invoice_meta_key_v2(id);
         if let Some(meta) = env.storage().persistent().get::<_, InvoiceMeta>(&old_key) {
             env.storage()
@@ -118,6 +181,15 @@ fn migration_v3(env: &Env) {
                 .set(&invoice_meta_key_v3(id), &meta);
             env.storage().persistent().remove(&old_key);
         }
+        id += 1;
+    }
+    cursor = end;
+    if cursor >= last_id {
+        clear_migration_cursor(env, 3);
+        true
+    } else {
+        set_migration_cursor(env, 3, cursor);
+        false
     }
 }
 
@@ -126,22 +198,34 @@ pub fn get_invoice_meta(env: &Env, id: u64) -> Option<InvoiceMeta> {
     env.storage().persistent().get(&invoice_meta_key_v3(id))
 }
 
-/// Run every migration between the stored schema version and
-/// [`CURRENT_SCHEMA_VERSION`], in order, bumping the stored version after
-/// each step so a partially-upgraded contract resumes from wherever it left
-/// off if `migrate` is called again (e.g. after hitting the instruction
-/// budget on a contract with many invoices).
-pub fn run_pending_migrations(env: &Env) -> u32 {
+/// Run pending migrations in bounded chunks of `batch_size` invoice ids per
+/// call. Each step advances the stored schema version only once its chunked
+/// loop has fully completed, and persists a per-target-version cursor so a
+/// subsequent `migrate` call resumes where the previous transaction left off.
+/// Returns the resulting schema version (which may still be below
+/// [`CURRENT_SCHEMA_VERSION`] if more chunks remain).
+pub fn run_pending_migrations(env: &Env, batch_size: u32) -> u32 {
+    let batch_size = if batch_size == 0 {
+        DEFAULT_MIGRATION_BATCH_SIZE
+    } else {
+        batch_size
+    };
     let mut version = schema_version(env);
     if version < 2 {
-        migration_v2(env);
-        version = 2;
-        set_schema_version(env, version);
+        if migration_v2(env, batch_size) {
+            version = 2;
+            set_schema_version(env, version);
+        } else {
+            return version;
+        }
     }
     if version < 3 {
-        migration_v3(env);
-        version = 3;
-        set_schema_version(env, version);
+        if migration_v3(env, batch_size) {
+            version = 3;
+            set_schema_version(env, version);
+        } else {
+            return version;
+        }
     }
     // Issue #36: Pedersen generators are pinned in instance storage during
     // `initialize()`, but contracts that are upgraded via Soroban WASM upgrade
