@@ -141,6 +141,14 @@
                   },
                   {
                     "key": {
+                      "symbol": "refunded_volume"
+                    },
+                    "val": {
+                      "i128": "0"
+                    }
+                  },
+                  {
+                    "key": {
                       "symbol": "released_count"
                     },
                     "val": {

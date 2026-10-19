@@ -10,6 +10,7 @@ pub struct CreatorDashboard {
     pub released_count: u64,
     pub refunded_count: u64,
     pub released_volume: i128,
+    pub refunded_volume: i128,
 }
 
 fn authorized_contract_key() -> Symbol {
@@ -54,6 +55,7 @@ impl DashboardContract {
                     released_count: 0,
                     refunded_count: 0,
                     released_volume: 0,
+                    refunded_volume: 0,
                 });
         dashboard.invoice_count = dashboard
             .invoice_count
@@ -92,6 +94,7 @@ impl DashboardContract {
                     released_count: 0,
                     refunded_count: 0,
                     released_volume: 0,
+                    refunded_volume: 0,
                 });
         dashboard.released_count = dashboard
             .released_count
@@ -110,7 +113,7 @@ impl DashboardContract {
         );
     }
 
-    pub fn record_refunded(env: Env, creator: Address) {
+    pub fn record_refunded(env: Env, creator: Address, total: i128) {
         let authorized: Address = env
             .storage()
             .instance()
@@ -129,17 +132,22 @@ impl DashboardContract {
                     released_count: 0,
                     refunded_count: 0,
                     released_volume: 0,
+                    refunded_volume: 0,
                 });
         dashboard.refunded_count = dashboard
             .refunded_count
             .checked_add(1)
             .expect("refunded_count overflow");
+        dashboard.refunded_volume = dashboard
+            .refunded_volume
+            .checked_add(total)
+            .expect("refunded_volume overflow");
         env.storage().persistent().set(&key, &dashboard);
 
         // Emit event for real-time indexing of creator metrics (#50).
         env.events().publish(
             (symbol_short!("dash"), symbol_short!("refunded"), creator),
-            (),
+            total,
         );
     }
 
@@ -154,6 +162,7 @@ impl DashboardContract {
                 released_count: 0,
                 refunded_count: 0,
                 released_volume: 0,
+                    refunded_volume: 0,
             })
     }
 }

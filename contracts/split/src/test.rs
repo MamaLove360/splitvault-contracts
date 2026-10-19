@@ -4027,7 +4027,7 @@ fn test_authorise_delegate_and_delegate_pay_records_beneficiary_as_payer() {
     env.ledger().set_timestamp(1_000);
 
     let id = make_invoice(&env, &c, &creator, &recipient, 100, &token_id, 9_999);
-    c.authorise_delegate(&beneficiary, &delegate);
+    c.authorise_delegate(&beneficiary, &delegate, &100_i128, &5_000_u64);
     c.delegate_pay(&delegate, &beneficiary, &id, &100_i128);
 
     let invoice = c.get_invoice(&id);
@@ -8971,4 +8971,152 @@ fn test_withdraw_contribution_no_double_refund() {
         balance_after_refund, 1_000,
         "double-refund detected: payer received tokens twice"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Issue #116: bounded delegation allowance and expiration
+// ---------------------------------------------------------------------------
+
+fn setup_delegation() -> (Env, Address, Address, Address, Address, u64) {
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let beneficiary = Address::generate(&env);
+    let delegate = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token_id).mint(&delegate, &1_000);
+    env.ledger().set_timestamp(1_000);
+
+    let id = make_invoice(&env, &c, &creator, &recipient, 500, &token_id, 9_999);
+    c.authorise_delegate(&beneficiary, &delegate, &100_i128, &2_000_u64);
+    (env, contract_id, token_id, beneficiary, delegate, id)
+}
+
+#[test]
+fn test_delegate_pay_decrements_allowance() {
+    let (env, contract_id, _token_id, beneficiary, delegate, id) = setup_delegation();
+    let c = client(&env, &contract_id);
+
+    c.delegate_pay(&delegate, &beneficiary, &id, &40_i128);
+
+    let d = c.get_delegation(&beneficiary, &delegate).unwrap();
+    assert_eq!(d.allowance, 60);
+    assert_eq!(d.expires_at, 2_000);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #69)")]
+fn test_delegate_pay_exceeding_allowance_rejected() {
+    let (env, contract_id, _token_id, beneficiary, delegate, id) = setup_delegation();
+    let c = client(&env, &contract_id);
+
+    c.delegate_pay(&delegate, &beneficiary, &id, &101_i128);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #69)")]
+fn test_delegate_pay_cumulative_allowance_enforced() {
+    let (env, contract_id, _token_id, beneficiary, delegate, id) = setup_delegation();
+    let c = client(&env, &contract_id);
+
+    c.delegate_pay(&delegate, &beneficiary, &id, &60_i128);
+    c.delegate_pay(&delegate, &beneficiary, &id, &41_i128);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #70)")]
+fn test_delegate_pay_after_expiry_rejected() {
+    let (env, contract_id, _token_id, beneficiary, delegate, id) = setup_delegation();
+    let c = client(&env, &contract_id);
+
+    env.ledger().set_timestamp(2_001);
+    c.delegate_pay(&delegate, &beneficiary, &id, &50_i128);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #70)")]
+fn test_authorise_delegate_with_past_expiry_rejected() {
+    let (env, contract_id, _token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+    env.ledger().set_timestamp(1_000);
+
+    c.authorise_delegate(
+        &Address::generate(&env),
+        &Address::generate(&env),
+        &100_i128,
+        &1_000_u64,
+    );
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #5)")]
+fn test_authorise_delegate_with_zero_allowance_rejected() {
+    let (env, contract_id, _token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+    env.ledger().set_timestamp(1_000);
+
+    c.authorise_delegate(
+        &Address::generate(&env),
+        &Address::generate(&env),
+        &0_i128,
+        &2_000_u64,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Issue #110: drip_claim validates the claimed token
+// ---------------------------------------------------------------------------
+
+#[test]
+#[should_panic(expected = "Error(Contract, #68)")]
+fn test_drip_claim_rejects_token_not_accepted() {
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    env.ledger().set_timestamp(1_000);
+
+    let id = make_invoice(&env, &c, &creator, &recipient, 100, &token_id, 9_999);
+    let other_token = env
+        .register_stellar_asset_contract_v2(Address::generate(&env))
+        .address();
+    c.drip_claim(&id, &recipient, &other_token);
+}
+
+// ---------------------------------------------------------------------------
+// Issue #122: circuit breaker lives in instance storage
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_circuit_breaker_stored_in_instance_storage() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    env.ledger().set_timestamp(1_000);
+    c.initialize(&admin, &0_i128, &treasury, &token_id, &0_u32, &None, &0_u32, &0_u32, &0_u64);
+
+    c.activate_circuit_breaker(&admin, &String::from_str(&env, "incident"));
+    env.as_contract(&contract_id, || {
+        assert_eq!(
+            env.storage().instance().get::<_, bool>(&circuit_breaker_key()),
+            Some(true)
+        );
+        assert!(env.storage().instance().has(&circuit_breaker_reason_key()));
+        assert!(!env.storage().persistent().has(&circuit_breaker_key()));
+    });
+    assert!(c.get_circuit_breaker_status().active);
+
+    c.deactivate_circuit_breaker(&admin);
+    env.as_contract(&contract_id, || {
+        assert_eq!(
+            env.storage().instance().get::<_, bool>(&circuit_breaker_key()),
+            Some(false)
+        );
+        assert!(!env.storage().instance().has(&circuit_breaker_reason_key()));
+    });
 }

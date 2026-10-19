@@ -18,6 +18,9 @@
               "args": [
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+                },
+                {
+                  "i128": "100"
                 }
               ]
             }
@@ -91,6 +94,14 @@
                     },
                     "val": {
                       "u64": "1"
+                    }
+                  },
+                  {
+                    "key": {
+                      "symbol": "refunded_volume"
+                    },
+                    "val": {
+                      "i128": "100"
                     }
                   },
                   {
@@ -192,7 +203,9 @@
                 "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
               }
             ],
-            "data": "void"
+            "data": {
+              "i128": "100"
+            }
           }
         }
       },

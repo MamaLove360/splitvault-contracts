@@ -1661,6 +1661,17 @@ pub struct CircuitBreakerStatus {
     pub reason: Option<String>,
 }
 
+/// Issue #116: Bounded spending authority granted to a payment delegate.
+/// `allowance` is the remaining amount the delegate may spend and is
+/// decremented on each `delegate_pay`; `expires_at` is the last ledger
+/// timestamp at which the delegation is valid.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DelegationAllowance {
+    pub allowance: i128,
+    pub expires_at: u64,
+}
+
 /// Issue #295: A single confidential payment record stored per payer.
 #[contracttype]
 #[derive(Clone, Debug)]

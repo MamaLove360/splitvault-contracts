@@ -88,7 +88,7 @@ use soroban_sdk::{
 const MAX_PARENT_DEPTH: u32 = 10;
 
 use types::{
-    AdminAction, AdminRole, AdminSet, AuditEntry, Bid, CircuitBreakerStatus,
+    AdminAction, AdminRole, AdminSet, AuditEntry, Bid, CircuitBreakerStatus, DelegationAllowance,
     CloneOverrides, CompactInvoice, CompactMigrateResult, CompletionProof, ComputeEstimate,
     ConfidentialPayment, ContributionResult, CreateInvoiceParams, CreatorStats, DelayedPayout,
     DisputeOutcome, DisputeRecord, DisputeStatus, FeeBracket, FeeSplit, FeeTier, InstalmentPlan,
@@ -2277,7 +2277,7 @@ fn assert_not_paused(env: &Env) -> Result<(), ContractError> {
     // Issue #297: also check circuit breaker.
     let cb_active: bool = env
         .storage()
-        .persistent()
+        .instance()
         .get(&circuit_breaker_key())
         .unwrap_or(false);
     if cb_active {
@@ -2591,7 +2591,7 @@ fn save_compact_status(env: &Env, id: u64, status: &InvoiceStatus) {
     );
 }
 
-fn maybe_record_refunded(env: &Env, creator: &Address) {
+fn maybe_record_refunded(env: &Env, creator: &Address, amount: i128) {
     if let Some(dashboard) = env
         .storage()
         .persistent()
@@ -2600,7 +2600,7 @@ fn maybe_record_refunded(env: &Env, creator: &Address) {
         let _: Val = env.invoke_contract(
             &dashboard,
             &Symbol::new(env, "record_refunded"),
-            (creator.clone(),).into_val(env),
+            (creator.clone(), amount).into_val(env),
         );
     }
 }
@@ -5220,7 +5220,7 @@ impl SplitContract {
         // Issue #297: circuit breaker blocks all creation, no exemptions.
         let cb_active: bool = env
             .storage()
-            .persistent()
+            .instance()
             .get(&circuit_breaker_key())
             .unwrap_or(false);
         assert!(!cb_active, "ContractPaused");
@@ -5404,7 +5404,7 @@ impl SplitContract {
 
         let cb_active: bool = env
             .storage()
-            .persistent()
+            .instance()
             .get(&circuit_breaker_key())
             .unwrap_or(false);
         assert!(!cb_active, "ContractPaused");
@@ -11593,7 +11593,7 @@ impl SplitContract {
                             &InvoiceStatus::Refunded,
                             &actor,
                         );
-                        maybe_record_refunded(&env, &invoice.creator);
+                        maybe_record_refunded(&env, &invoice.creator, total_refunded_amount);
                         notify_invoice(
                             &env,
                             invoice_id,
@@ -11815,7 +11815,7 @@ impl SplitContract {
             symbol_short!("refund"),
             &invoice.notification_contract,
         );
-        maybe_record_refunded(&env, &invoice.creator);
+        maybe_record_refunded(&env, &invoice.creator, total_refunded_amount);
         update_rep_internal(&env, &invoice.creator, |score| {
             score.invoices_refunded = score.invoices_refunded.saturating_add(1);
         });
@@ -12401,7 +12401,7 @@ impl SplitContract {
                 &InvoiceStatus::Cancelled,
                 &caller,
             );
-            maybe_record_refunded(&env, &invoice.creator);
+            maybe_record_refunded(&env, &invoice.creator, total_refunded_amount);
 
             // Increment total_refunded counter (issue #28).
             let total_refunded: i128 = env
@@ -12438,7 +12438,7 @@ impl SplitContract {
                 &caller,
             );
             // Issue #30: notify dashboard on cancellation regardless of funding.
-            maybe_record_refunded(&env, &invoice.creator);
+            maybe_record_refunded(&env, &invoice.creator, 0);
         }
 
         // Issue #503: decrement per-creator open-invoice counter on cancel.
@@ -13193,8 +13193,19 @@ impl SplitContract {
     // -----------------------------------------------------------------------
 
     /// Claim the vested portion of a drip invoice for a recipient.
-    pub fn drip_claim(env: Env, invoice_id: u64, recipient: Address) {
+    pub fn drip_claim(env: Env, invoice_id: u64, recipient: Address, token: Address) {
         let mut invoice = load_invoice(&env, invoice_id);
+
+        // Issue #110: the claimed asset must be one the invoice accepts; fall
+        // back to the funding token for single-token invoices.
+        let token_accepted = if invoice.tokens.is_empty() {
+            token == funding_token_for(&invoice)
+        } else {
+            invoice.tokens.iter().any(|t| t == token)
+        };
+        if !token_accepted {
+            panic_with_error!(&env, ContractError::TokenNotAccepted);
+        }
 
         assert!(
             invoice.status == InvoiceStatus::Released,
@@ -13225,7 +13236,7 @@ impl SplitContract {
         invoice.claimed.set(idx, already_claimed + claimable);
         save_invoice(&env, invoice_id, &invoice);
 
-        let token_client = token::Client::new(&env, &funding_token_for(&invoice));
+        let token_client = token::Client::new(&env, &token);
         token_client.transfer(&env.current_contract_address(), &recipient, &claimable);
     }
 
@@ -14002,22 +14013,57 @@ impl SplitContract {
 
     /// Authorise an address to pay on behalf of the beneficiary.
     /// Requires beneficiary auth.
-    pub fn authorise_delegate(env: Env, beneficiary: Address, delegate: Address) {
+    ///
+    /// Issue #116: the delegation is bounded by `allowance` (the maximum total
+    /// the delegate may spend) and `expires_at` (the last ledger timestamp at
+    /// which the delegation is valid). Calling again replaces any existing
+    /// allowance for the same delegate.
+    pub fn authorise_delegate(
+        env: Env,
+        beneficiary: Address,
+        delegate: Address,
+        allowance: i128,
+        expires_at: u64,
+    ) {
         require_not_paused(&env);
         beneficiary.require_auth();
 
-        let mut delegates: Vec<Address> = env
+        if allowance <= 0 {
+            panic_with_error!(&env, ContractError::InvalidAmount);
+        }
+        if expires_at <= env.ledger().timestamp() {
+            panic_with_error!(&env, ContractError::DelegationExpired);
+        }
+
+        let mut delegates: Map<Address, DelegationAllowance> = env
             .storage()
             .persistent()
             .get(&delegate_pay_key(&beneficiary))
-            .unwrap_or_else(|| Vec::new(&env));
+            .unwrap_or_else(|| Map::new(&env));
 
-        if !delegates.iter().any(|d| d == delegate) {
-            delegates.push_back(delegate.clone());
-            env.storage()
-                .persistent()
-                .set(&delegate_pay_key(&beneficiary), &delegates);
-        }
+        delegates.set(
+            delegate,
+            DelegationAllowance {
+                allowance,
+                expires_at,
+            },
+        );
+        env.storage()
+            .persistent()
+            .set(&delegate_pay_key(&beneficiary), &delegates);
+    }
+
+    /// Return the remaining delegation for `delegate` on behalf of
+    /// `beneficiary`, if any (issue #116).
+    pub fn get_delegation(
+        env: Env,
+        beneficiary: Address,
+        delegate: Address,
+    ) -> Option<DelegationAllowance> {
+        env.storage()
+            .persistent()
+            .get::<_, Map<Address, DelegationAllowance>>(&delegate_pay_key(&beneficiary))
+            .and_then(|m| m.get(delegate))
     }
 
     /// Pay toward an invoice using an authorised delegate.
@@ -14032,12 +14078,19 @@ impl SplitContract {
         require_not_paused(&env);
         delegate.require_auth();
 
-        let delegates: Vec<Address> = env
+        let mut delegates: Map<Address, DelegationAllowance> = env
             .storage()
             .persistent()
             .get(&delegate_pay_key(&beneficiary))
-            .unwrap_or_else(|| Vec::new(&env));
-        assert!(delegates.iter().any(|d| d == delegate), "not authorised");
+            .unwrap_or_else(|| Map::new(&env));
+        let mut delegation = delegates.get(delegate.clone()).expect("not authorised");
+        // Issue #116: enforce expiration and remaining allowance.
+        if env.ledger().timestamp() > delegation.expires_at {
+            panic_with_error!(&env, ContractError::DelegationExpired);
+        }
+        if amount > delegation.allowance {
+            panic_with_error!(&env, ContractError::DelegationAllowanceExceeded);
+        }
 
         let mut invoice = load_invoice(&env, invoice_id);
         assert!(
@@ -14056,6 +14109,12 @@ impl SplitContract {
         let total: i128 = invoice.amounts.iter().sum();
         let remaining = total - invoice.funded;
         assert!(amount <= remaining, "payment exceeds remaining balance");
+
+        delegation.allowance -= amount;
+        delegates.set(delegate.clone(), delegation);
+        env.storage()
+            .persistent()
+            .set(&delegate_pay_key(&beneficiary), &delegates);
 
         let token_client = token::Client::new(&env, &funding_token_for(&invoice));
         token_client.transfer(&delegate, &env.current_contract_address(), &amount);
@@ -14349,10 +14408,10 @@ impl SplitContract {
     pub fn activate_circuit_breaker(env: Env, admin: Address, reason: String) {
         require_admin_role(&env, &admin, AdminRole::SuperAdmin);
         env.storage()
-            .persistent()
+            .instance()
             .set(&circuit_breaker_key(), &true);
         env.storage()
-            .persistent()
+            .instance()
             .set(&circuit_breaker_reason_key(), &reason.clone());
         events::circuit_breaker_activated(&env, &reason);
     }
@@ -14361,10 +14420,10 @@ impl SplitContract {
     pub fn deactivate_circuit_breaker(env: Env, admin: Address) {
         require_admin_role(&env, &admin, AdminRole::SuperAdmin);
         env.storage()
-            .persistent()
+            .instance()
             .set(&circuit_breaker_key(), &false);
         env.storage()
-            .persistent()
+            .instance()
             .remove(&circuit_breaker_reason_key());
         events::circuit_breaker_deactivated(&env);
     }
@@ -14374,12 +14433,12 @@ impl SplitContract {
     pub fn get_circuit_breaker_status(env: Env) -> CircuitBreakerStatus {
         let active: bool = env
             .storage()
-            .persistent()
+            .instance()
             .get(&circuit_breaker_key())
             .unwrap_or(false);
         let reason: Option<String> = env
             .storage()
-            .persistent()
+            .instance()
             .get(&circuit_breaker_reason_key());
         CircuitBreakerStatus { active, reason }
     }
@@ -14628,7 +14687,7 @@ impl SplitContract {
 
         events::refund_claimed(&env, invoice_id, &payer, payer_total);
         // Issue #30: notify dashboard when a payer claims a refund on an expired invoice.
-        maybe_record_refunded(&env, &invoice.creator);
+        maybe_record_refunded(&env, &invoice.creator, payer_total);
         append_audit_entry(&env, invoice_id, symbol_short!("clm_ref"), &payer);
     }
 

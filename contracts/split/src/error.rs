@@ -147,4 +147,10 @@ pub enum ContractError {
     TooFewRecipients = 66,
     /// Issue #29: A stage release was attempted out of order; the preceding stage has not been released yet.
     PriorStageNotReleased = 67,
+    /// Issue #110: The supplied token is not one of the invoice's accepted tokens.
+    TokenNotAccepted = 68,
+    /// Issue #116: The delegate payment exceeds the remaining delegated allowance.
+    DelegationAllowanceExceeded = 69,
+    /// Issue #116: The delegation's expiration timestamp has passed.
+    DelegationExpired = 70,
 }

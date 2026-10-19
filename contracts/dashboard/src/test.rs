@@ -77,7 +77,7 @@ fn test_record_refunded_updates_stats() {
     let creator = Address::generate(&env);
 
     client.record_created(&creator, &1000_i128);
-    client.record_refunded(&creator);
+    client.record_refunded(&creator, &1000_i128);
 
     let dash = client.get_creator_dashboard(&creator);
     assert_eq!(dash.invoice_count, 1);
@@ -85,6 +85,7 @@ fn test_record_refunded_updates_stats() {
     assert_eq!(dash.released_count, 0);
     assert_eq!(dash.refunded_count, 1);
     assert_eq!(dash.released_volume, 0);
+    assert_eq!(dash.refunded_volume, 1000);
 }
 
 #[test]
@@ -99,7 +100,7 @@ fn test_stats_are_per_creator() {
     client.record_created(&creator_a, &200_i128);
     client.record_created(&creator_b, &500_i128);
     client.record_released(&creator_a, &300_i128);
-    client.record_refunded(&creator_b);
+    client.record_refunded(&creator_b, &500_i128);
 
     let dash_a = client.get_creator_dashboard(&creator_a);
     assert_eq!(dash_a.invoice_count, 2);
@@ -202,7 +203,7 @@ fn test_record_refunded_emits_event() {
     let client = DashboardContractClient::new(&env, &dashboard_id);
     let creator = Address::generate(&env);
 
-    client.record_refunded(&creator);
+    client.record_refunded(&creator, &100_i128);
 
     assert!(
         find_dash_event(&env, symbol_short!("refunded")),
