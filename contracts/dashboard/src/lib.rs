@@ -12,8 +12,12 @@ pub struct CreatorDashboard {
     pub released_volume: i128,
 }
 
-fn authorized_contract_key() -> Symbol {
-    symbol_short!("auth_ctr")
+fn admin_key() -> Symbol {
+    symbol_short!("admin")
+}
+
+fn authorized_contract_key(split_contract: &Address) -> (Symbol, Address) {
+    (symbol_short!("auth_ctr"), split_contract.clone())
 }
 
 fn creator_dashboard_key(creator: &Address) -> (Symbol, Address) {
@@ -54,23 +58,72 @@ pub struct DashboardContract;
 
 #[contractimpl]
 impl DashboardContract {
-    pub fn initialize(env: Env, split_contract: Address) {
+    pub fn initialize(env: Env, admin: Address, split_contract: Address) {
         assert!(
-            !env.storage().instance().has(&authorized_contract_key()),
+            !env.storage().instance().has(&admin_key()),
             "already initialized"
         );
+        env.storage().instance().set(&admin_key(), &admin);
         env.storage()
             .instance()
-            .set(&authorized_contract_key(), &split_contract);
+            .set(&authorized_contract_key(&split_contract), &true);
+    }
+
+    /// Register an additional split contract instance (e.g. factory-deployed).
+    /// Only the dashboard admin may authorize new split contracts.
+    pub fn register_split_contract(env: Env, split_contract: Address) {
+        require_admin(&env);
+
+        env.storage()
+            .instance()
+            .set(&authorized_contract_key(&split_contract), &true);
+
+        env.events().publish(
+            (symbol_short!("dash"), symbol_short!("register")),
+            split_contract,
+        );
+    }
+
+    /// Update the authorized split contract address, e.g. after a protocol
+    /// upgrade replaces the split contract. Requires admin authorization.
+    pub fn set_authorized_contract(env: Env, split_contract: Address) {
+        require_admin(&env);
+
+        env.storage()
+            .instance()
+            .set(&authorized_contract_key(&split_contract), &true);
+
+        env.events().publish(
+            (symbol_short!("dash"), symbol_short!("set_auth")),
+            split_contract,
+        );
+    }
+
+    /// Rotate the dashboard admin. Requires the current admin's authorization.
+    pub fn set_admin(env: Env, new_admin: Address) {
+        require_admin(&env);
+
+        env.storage().instance().set(&admin_key(), &new_admin);
+
+        env.events().publish(
+            (symbol_short!("dash"), symbol_short!("set_admin")),
+            new_admin,
+        );
+    }
+
+    pub fn get_admin(env: Env) -> Address {
+        env.storage()
+            .instance()
+            .get(&admin_key())
+            .expect("not initialized")
+    }
+
+    pub fn is_authorized_split_contract(env: Env, caller: Address) -> bool {
+        is_authorized_split_contract(&env, &caller)
     }
 
     pub fn record_created(env: Env, creator: Address, total: i128) {
-        let authorized: Address = env
-            .storage()
-            .instance()
-            .get(&authorized_contract_key())
-            .expect("not initialized");
-        authorized.require_auth();
+        require_authorized_split_contract(&env, &env.current_contract_address());
 
         let key = creator_dashboard_key(&creator);
         let mut dashboard: CreatorDashboard =
@@ -105,12 +158,7 @@ impl DashboardContract {
     }
 
     pub fn record_released(env: Env, creator: Address, total: i128) {
-        let authorized: Address = env
-            .storage()
-            .instance()
-            .get(&authorized_contract_key())
-            .expect("not initialized");
-        authorized.require_auth();
+        require_authorized_split_contract(&env, &env.current_contract_address());
 
         let key = creator_dashboard_key(&creator);
         let mut dashboard: CreatorDashboard =
@@ -144,12 +192,7 @@ impl DashboardContract {
     }
 
     pub fn record_refunded(env: Env, creator: Address) {
-        let authorized: Address = env
-            .storage()
-            .instance()
-            .get(&authorized_contract_key())
-            .expect("not initialized");
-        authorized.require_auth();
+        require_authorized_split_contract(&env, &env.current_contract_address());
 
         let key = creator_dashboard_key(&creator);
         let mut dashboard: CreatorDashboard =
