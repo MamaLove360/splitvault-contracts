@@ -293,8 +293,8 @@ impl Registry {
             "already registered"
         );
 
-        // Enforce per-creator limit.
-        let mut contracts: Vec<Address> = env
+        // Enforce per-creator limit using the tracked count.
+        let count: u32 = env
             .storage()
             .persistent()
             .get(&contracts_key)
@@ -340,17 +340,26 @@ impl Registry {
 
     /// Return the list of contracts registered under `creator`.
     pub fn get_contracts(env: Env, creator: Address) -> Vec<Address> {
-        let key = creator_contracts_key(&creator);
-        let contracts: Vec<Address> = env
+        let count_key = creator_count_key(&creator);
+        let count: u32 = env
             .storage()
             .persistent()
-            .get(&key)
-            .unwrap_or_else(|| Vec::new(&env));
+            .get(&count_key)
+            .unwrap_or(0);
+
+        let mut contracts: Vec<Address> = Vec::new(&env);
+        for index in 0..count {
+            let key = creator_contract_key(&creator, index);
+            if let Some(addr) = env.storage().persistent().get::<_, Address>(&key) {
+                contracts.push_back(addr);
+            }
+        }
+
         // Bump TTL on every read so active registries never expire (#48).
-        if env.storage().persistent().has(&key) {
+        if env.storage().persistent().has(&count_key) {
             env.storage()
                 .persistent()
-                .extend_ttl(&key, REGISTRY_MIN_TTL, REGISTRY_MAX_TTL);
+                .extend_ttl(&count_key, REGISTRY_MIN_TTL, REGISTRY_MAX_TTL);
         }
         contracts
     }
