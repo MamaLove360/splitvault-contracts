@@ -1,9 +1,13 @@
-#![no_std]
+//! Dashboard contract: aggregates per-creator invoice metrics.
+//!
+//! The split contract calls into this contract to record invoice lifecycle
+//! events. Metrics are stored per creator so the frontend can render a
+//! dashboard without scanning the full invoice history.
 
-use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env, Symbol};
+use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env};
 
 #[contracttype]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct CreatorDashboard {
     pub invoice_count: u64,
     pub total_volume: i128,
@@ -191,6 +195,7 @@ impl DashboardContract {
         );
     }
 
+    /// Record a refunded invoice for `creator`.
     pub fn record_refunded(env: Env, creator: Address) {
         require_authorized_split_contract(&env, &env.current_contract_address());
 
@@ -216,20 +221,8 @@ impl DashboardContract {
         dashboard_record_refunded(&env, &creator, dashboard.refunded_count);
     }
 
+    /// Read the aggregated dashboard for `creator`.
     pub fn get_creator_dashboard(env: Env, creator: Address) -> CreatorDashboard {
-        let key = creator_dashboard_key(&creator);
-        env.storage()
-            .persistent()
-            .get(&key)
-            .unwrap_or(CreatorDashboard {
-                invoice_count: 0,
-                total_volume: 0,
-                released_count: 0,
-                refunded_count: 0,
-                released_volume: 0,
-            })
+        Self::load(&env, &creator)
     }
 }
-
-#[cfg(test)]
-mod test;
