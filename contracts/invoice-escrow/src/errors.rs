@@ -50,6 +50,8 @@ pub enum Error {
     DepositTooSmall = 20,
     /// Reentrant call detected; this function is already executing.
     Reentrancy = 21,
-    /// The blacklist appeal window has not yet expired and no appeal was submitted.
-    AppealWindowNotExpired = 22,
+    /// Per-payer sliding-window velocity cap would be exceeded.
+    VelocityLimitExceeded = 22,
+    /// Aggregate per-invoice sliding-window intake velocity cap would be exceeded.
+    InvoiceVelocityLimitExceeded = 23,
 }
