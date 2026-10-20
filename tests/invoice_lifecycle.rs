@@ -3,15 +3,14 @@
 use soroban_sdk::{testutils::Address as _, Address, Env, Vec};
 use soroban_sdk::testutils::token::MockToken;
 
-mod contract {
-    soroban_sdk::contractimport!(file = "target/wasm32-unknown-unknown/release/split_contracts.wasm");
-}
+use split_contracts::contract::{SplitContractClient, InvoiceOptions};
 
 #[test]
 fn test_full_invoice_lifecycle() {
     let e = Env::default();
-    let contract_id = e.register_contract_wasm(None, contract::WASM);
-    let client = contract::Client::new(&e, &contract_id);
+    e.mock_all_auths();
+    let contract_id = e.register_contract(None, split_contracts::contract::SplitContract);
+    let client = SplitContractClient::new(&e, &contract_id);
 
     // Setup
     let creator = Address::generate(&e);
@@ -24,8 +23,9 @@ fn test_full_invoice_lifecycle() {
     recipients.push_back(recipient.clone());
     let mut amounts = Vec::new(&e);
     amounts.push_back(1000);
-    
-    let invoice_id = client.create_invoice(&creator, &recipients, &amounts, &token.address, &10000);
+
+    let options = InvoiceOptions::default();
+    let invoice_id = client.create_invoice(&creator, &recipients, &amounts, &token.address, &10000, &options);
 
     // Pay
     token.mint(&payer, &1000);

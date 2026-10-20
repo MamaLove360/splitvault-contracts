@@ -135,3 +135,17 @@ This project participates in the [Drips Wave Program](https://drips.network/wave
 See [CONTRIBUTING.md](./CONTRIBUTING.md) for the full contribution guide.
 
 **Do not start coding until assigned to an issue by a maintainer.**
+
+## Handsoff notes
+
+<!-- handsoff-issue-5 -->
+- #5: Missing Authorization for Dynamic Payout Address Modification in `rotate_recipient_address`
+
+<!-- handsoff-issue-6 -->
+- #6: Pool Pay Cross-Invoice Limit Bypass for Blocked and Velocity-Capped Payers
+
+<!-- handsoff-issue-63 -->
+- #63: Incomplete State Clean-up During Emergency Circuit Breaker Rollbacks
+
+<!-- handsoff-issue-64 -->
+- #64: Silent Payout Loss in `reveal_confidential_payment` Due to Omission of Shard Storage

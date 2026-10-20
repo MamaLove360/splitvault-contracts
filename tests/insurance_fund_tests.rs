@@ -42,10 +42,11 @@ fn test_insurance_fund_deposit_on_invoice_creation() {
 
     assert_eq!(invoice.total_amount, 1000);
 }
-}
 
 #[test]
 fn test_insurance_fund_balance_read() {
+    use split_contracts::contract::Client as SplitContractClient;
+
     let env = Env::default();
     env.mock_all_auths();
 
@@ -56,11 +57,32 @@ fn test_insurance_fund_balance_read() {
 
     StellarAssetClient::new(&env, &token_id).mint(&token_admin, &1_000_000_000);
 
-    // Deploy contract with initial insurance fund balance of 0
-    // Call get_insurance_fund_balance()
-    // Assert it returns 0 initially
-    
-    // After deposits, verify balance increases monotonically
+    let contract_id = env.register_contract_wasm(None, split_contracts::WASM);
+    let client = SplitContractClient::new(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    // Initially the insurance fund balance should be zero.
+    assert_eq!(client.get_insurance_fund_balance(), 0);
+
+    let mut recipients = Vec::new(&env);
+    recipients.push_back(recipient.clone());
+    let mut amounts = Vec::new(&env);
+    amounts.push_back(1000_i128);
+
+    env.ledger().set_timestamp(1_000);
+    client.create_invoice(&creator, &recipients, &amounts, &token_id, &9_999);
+
+    // After a deposit the balance should increase monotonically.
+    let after_first = client.get_insurance_fund_balance();
+    assert!(after_first > 0);
+
+    env.ledger().set_timestamp(2_000);
+    client.create_invoice(&creator, &recipients, &amounts, &token_id, &9_999);
+
+    let after_second = client.get_insurance_fund_balance();
+    assert!(after_second > after_first);
 }
 
 #[test]
@@ -141,6 +163,8 @@ fn test_insurance_withdraw_surplus_admin_only() {
 
 #[test]
 fn test_insurance_fund_grows_with_multiple_invoices() {
+    use split_contracts::contract::Client as SplitContractClient;
+
     let env = Env::default();
     env.mock_all_auths();
 
@@ -151,14 +175,35 @@ fn test_insurance_fund_grows_with_multiple_invoices() {
 
     StellarAssetClient::new(&env, &token_id).mint(&token_admin, &1_000_000_000);
 
-    // Create 5 invoices with varying amounts
-    // Each should contribute (amount * INSURANCE_FUND_BPS / 10_000) to the fund
-    
-    // Verify final balance = sum of all contributions
+    let contract_id = env.register_contract_wasm(None, split_contracts::WASM);
+    let client = SplitContractClient::new(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    let invoice_amounts: [i128; 5] = [1000, 2000, 3000, 4000, 5000];
+    let mut expected_total: i128 = 0;
+
+    for (i, amount) in invoice_amounts.iter().enumerate() {
+        let mut recipients = Vec::new(&env);
+        recipients.push_back(recipient.clone());
+        let mut amounts = Vec::new(&env);
+        amounts.push_back(*amount);
+
+        env.ledger().set_timestamp(1_000 + i as u64);
+        client.create_invoice(&creator, &recipients, &amounts, &token_id, &9_999);
+
+        // Each invoice contributes (amount * INSURANCE_FUND_BPS / 10_000).
+        expected_total += amount * 10 / 10_000;
+    }
+
+    assert_eq!(client.get_insurance_fund_balance(), expected_total);
 }
 
 #[test]
 fn test_insurance_fund_cannot_claim_more_than_balance() {
+    use split_contracts::contract::Client as SplitContractClient;
+
     let env = Env::default();
     env.mock_all_auths();
 
@@ -169,12 +214,29 @@ fn test_insurance_fund_cannot_claim_more_than_balance() {
 
     StellarAssetClient::new(&env, &token_id).mint(&token_admin, &1_000_000_000);
 
+    let contract_id = env.register_contract_wasm(None, split_contracts::WASM);
+    let client = SplitContractClient::new(&env, &contract_id);
+
     let admin = Address::generate(&env);
     let claimant = Address::generate(&env);
 
-    // Set insurance fund balance to 100
-    // Attempt to claim 200
-    // Assert it panics with insufficient_funds error
+    // Set insurance fund balance to 100 by creating an invoice that deposits 100.
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let mut recipients = Vec::new(&env);
+    recipients.push_back(recipient.clone());
+    let mut amounts = Vec::new(&env);
+    amounts.push_back(100_000_i128);
+
+    env.ledger().set_timestamp(1_000);
+    client.create_invoice(&creator, &recipients, &amounts, &token_id, &9_999);
+
+    let balance = client.get_insurance_fund_balance();
+    assert_eq!(balance, 100);
+
+    // Attempt to claim more than the balance; must panic with insufficient_funds.
+    let result = client.try_claim_insurance(&admin, &claimant, &(balance + 100));
+    assert!(result.is_err());
 }
 
 #[test]
