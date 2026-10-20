@@ -1,9 +1,19 @@
+//! DEPRECATED: This embedded factory module is deprecated and will be removed.
+//!
+//! The canonical deployment factory now lives in the standalone
+//! `contracts/factory` crate (`SplitFactory`). This module is retained only
+//! for backward compatibility and is no longer exposed as a public surface of
+//! the `split` crate. New integrations MUST use `contracts/factory`.
+//!
 //! Issue #178: SplitFactory — deploy and registry for SplitContract instances.
 //!
 //! The factory deploys new `SplitContract` instances with shared configuration
 //! and maintains a persistent registry of all deployed contract addresses.
 
 #![allow(dead_code)]
+#![deprecated(
+    note = "Use the canonical `contracts/factory` crate (`SplitFactory`) instead. This embedded factory is deprecated and will be removed."
+)]
 
 use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, BytesN, Env, Symbol, Vec};
 
@@ -51,6 +61,7 @@ pub struct FactoryConfig {
 // Contract
 // ---------------------------------------------------------------------------
 
+/// DEPRECATED: use `contracts::factory::SplitFactory` instead.
 #[contract]
 pub struct SplitFactory;
 
@@ -137,6 +148,7 @@ impl SplitFactory {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod test {
     use super::*;
     use soroban_sdk::{testutils::Address as _, BytesN, Env};
