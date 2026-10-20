@@ -9,10 +9,11 @@ fn setup() -> (Env, Address, Address) {
     env.mock_all_auths();
 
     let split_id = Address::generate(&env);
+    let admin = Address::generate(&env);
     let dashboard_id = env.register(DashboardContract, ());
 
     let client = DashboardContractClient::new(&env, &dashboard_id);
-    client.initialize(&split_id);
+    client.initialize(&split_id, &admin);
 
     (env, split_id, dashboard_id)
 }
@@ -122,10 +123,11 @@ fn test_unauthorized_caller_rejected() {
     let env = Env::default();
 
     let split_id = Address::generate(&env);
+    let admin = Address::generate(&env);
     let dashboard_id = env.register(DashboardContract, ());
 
     let client = DashboardContractClient::new(&env, &dashboard_id);
-    client.initialize(&split_id);
+    client.initialize(&split_id, &admin);
 
     let creator = Address::generate(&env);
 
@@ -135,38 +137,86 @@ fn test_unauthorized_caller_rejected() {
 }
 
 // ---------------------------------------------------------------------------
-// #85 — Batch ingestion tests
+// #83 — Multi-instance split contract registry tests
 // ---------------------------------------------------------------------------
 
+/// A second split contract registered by the admin can report metrics (#83).
 #[test]
-fn test_record_batch_released_updates_stats() {
-    let (env, _split_id, dashboard_id) = setup();
+fn test_multiple_split_contracts_can_report() {
+    let (env, split_a, dashboard_id) = setup();
     let client = DashboardContractClient::new(&env, &dashboard_id);
 
-    let creator = Address::generate(&env);
+    let split_b = Address::generate(&env);
+    client.register_split_contract(&split_b);
 
-    client.record_batch_released(&creator, &10_u64, &50_000_i128);
+    assert!(client.is_authorized_split_contract(&split_a));
+    assert!(client.is_authorized_split_contract(&split_b));
+
+    let creator = Address::generate(&env);
+    client.record_created(&creator, &1000_i128);
+    client.record_created(&creator, &2000_i128);
 
     let dash = client.get_creator_dashboard(&creator);
-    assert_eq!(dash.released_count, 10);
-    assert_eq!(dash.released_volume, 50_000);
-    assert_eq!(dash.invoice_count, 0);
-    assert_eq!(dash.refunded_count, 0);
+    assert_eq!(dash.invoice_count, 2);
+    assert_eq!(dash.total_volume, 3000);
 }
 
+/// Registering the same split contract twice is idempotent (#83).
 #[test]
-fn test_record_batch_released_accumulates() {
+fn test_register_split_contract_idempotent() {
+    let (env, split_a, dashboard_id) = setup();
+    let client = DashboardContractClient::new(&env, &dashboard_id);
+
+    client.register_split_contract(&split_a);
+    assert!(client.is_authorized_split_contract(&split_a));
+}
+
+/// An unregistered split contract is not authorized (#83).
+#[test]
+fn test_unregistered_split_contract_not_authorized() {
+    let (env, _split_a, dashboard_id) = setup();
+    let client = DashboardContractClient::new(&env, &dashboard_id);
+
+    let stranger = Address::generate(&env);
+    assert!(!client.is_authorized_split_contract(&stranger));
+}
+
+// ---------------------------------------------------------------------------
+// #84 — Admin rotation and authorized contract management tests
+// ---------------------------------------------------------------------------
+
+/// The admin can update the authorized contract, and the new address can report (#84).
+#[test]
+fn test_set_authorized_contract_as_admin() {
     let (env, _split_id, dashboard_id) = setup();
     let client = DashboardContractClient::new(&env, &dashboard_id);
 
-    let creator = Address::generate(&env);
+    let new_split = Address::generate(&env);
+    client.set_authorized_contract(&new_split);
 
-    client.record_released(&creator, &1_000_i128);
-    client.record_batch_released(&creator, &10_u64, &50_000_i128);
+    assert!(client.is_authorized_split_contract(&new_split));
+
+    let creator = Address::generate(&env);
+    client.record_created(&creator, &1000_i128);
 
     let dash = client.get_creator_dashboard(&creator);
-    assert_eq!(dash.released_count, 11);
-    assert_eq!(dash.released_volume, 51_000);
+    assert_eq!(dash.invoice_count, 1);
+    assert_eq!(dash.total_volume, 1000);
+}
+
+/// The admin can rotate the admin address (#84).
+#[test]
+fn test_set_admin_rotates_admin() {
+    let (env, _split_id, dashboard_id) = setup();
+    let client = DashboardContractClient::new(&env, &dashboard_id);
+
+    let new_admin = Address::generate(&env);
+    client.set_admin(&new_admin);
+
+    // New admin can still perform administrative actions.
+    let new_split = Address::generate(&env);
+    client.set_authorized_contract(&new_split);
+    assert!(client.is_authorized_split_contract(&new_split));
 }
 
 // ---------------------------------------------------------------------------
@@ -222,7 +272,8 @@ fn test_record_released_emits_event() {
     let client = DashboardContractClient::new(&env, &dashboard_id);
     let creator = Address::generate(&env);
 
-    client.record_released(&creator, &300_i128);
+    client.record_created(&creator, &500_i128);
+    client.record_released(&creator, &500_i128);
 
     assert!(
         find_dash_event(&env, symbol_short!("released")),
@@ -245,17 +296,94 @@ fn test_record_refunded_emits_event() {
     );
 }
 
-/// `record_batch_released` must emit `(dash, batch_rel)` (#85).
+// ---------------------------------------------------------------------------
+// #107 — Dashboard event payload tests
+// ---------------------------------------------------------------------------
+
+/// Collect the data payload of the first `(dash, action)` event as a tuple of
+/// `(creator, count, volume)` where applicable.
+fn find_dash_event_data(
+    env: &Env,
+    action: soroban_sdk::Symbol,
+) -> Option<(Address, i128, i128)> {
+    let events = env.events().all();
+    for event in events.events().iter() {
+        let soroban_sdk::xdr::ContractEventBody::V0(body) = &event.body;
+        let mut topics = soroban_sdk::Vec::new(env);
+        let topics_ref: &[soroban_sdk::xdr::ScVal] = body.topics.as_ref();
+        for v in topics_ref.iter() {
+            if let Ok(val) = <Val as TryFromVal<Env, soroban_sdk::xdr::ScVal>>::try_from_val(env, v) {
+                topics.push_back(val);
+            }
+        }
+        if topics.len() >= 2 {
+            let t0 = <soroban_sdk::Symbol as TryFromVal<Env, Val>>::try_from_val(env, &topics.get_unchecked(0));
+            let t1 = <soroban_sdk::Symbol as TryFromVal<Env, Val>>::try_from_val(env, &topics.get_unchecked(1));
+            if let (Ok(topic0), Ok(topic1)) = (t0, t1) {
+                if topic0 == symbol_short!("dash") && topic1 == action {
+                    let data_val = <Val as TryFromVal<Env, soroban_sdk::xdr::ScVal>>::try_from_val(
+                        env,
+                        &body.data,
+                    )
+                    .ok()?;
+                    let tuple = <(Address, i128, i128) as TryFromVal<Env, Val>>::try_from_val(
+                        env, &data_val,
+                    )
+                    .ok()?;
+                    return Some(tuple);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// `record_created` event data must carry creator, invoice_count, total_volume (#107).
 #[test]
-fn test_record_batch_released_emits_event() {
+fn test_record_created_event_payload() {
     let (env, _split_id, dashboard_id) = setup();
     let client = DashboardContractClient::new(&env, &dashboard_id);
     let creator = Address::generate(&env);
 
-    client.record_batch_released(&creator, &10_u64, &50_000_i128);
+    client.record_created(&creator, &1000_i128);
+    client.record_created(&creator, &2000_i128);
 
-    assert!(
-        find_dash_event(&env, symbol_short!("batch_rel")),
-        "record_batch_released did not emit (dash, batch_rel) event",
-    );
+    let (ev_creator, count, volume) =
+        find_dash_event_data(&env, symbol_short!("created")).expect("missing created event");
+    assert_eq!(ev_creator, creator);
+    assert_eq!(count, 2);
+    assert_eq!(volume, 3000);
+}
+
+/// `record_released` event data must carry creator, released_count, released_volume (#107).
+#[test]
+fn test_record_released_event_payload() {
+    let (env, _split_id, dashboard_id) = setup();
+    let client = DashboardContractClient::new(&env, &dashboard_id);
+    let creator = Address::generate(&env);
+
+    client.record_released(&creator, &3000_i128);
+    client.record_released(&creator, &2000_i128);
+
+    let (ev_creator, count, volume) =
+        find_dash_event_data(&env, symbol_short!("released")).expect("missing released event");
+    assert_eq!(ev_creator, creator);
+    assert_eq!(count, 2);
+    assert_eq!(volume, 5000);
+}
+
+/// `record_refunded` event data must carry creator and refunded_count (#107).
+#[test]
+fn test_record_refunded_event_payload() {
+    let (env, _split_id, dashboard_id) = setup();
+    let client = DashboardContractClient::new(&env, &dashboard_id);
+    let creator = Address::generate(&env);
+
+    client.record_refunded(&creator);
+    client.record_refunded(&creator);
+
+    let (ev_creator, count, _volume) =
+        find_dash_event_data(&env, symbol_short!("refunded")).expect("missing refunded event");
+    assert_eq!(ev_creator, creator);
+    assert_eq!(count, 2);
 }
